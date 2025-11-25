@@ -38,6 +38,8 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback
     String workersPath = "/dist26/workers";
     String tasksPath = "/dist26/tasks";
     String workerPath;
+    Set<String> aliveWorkers = new HashSet<>();
+
 
 
     DistProcess(String zkhost)
@@ -120,6 +122,10 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback
 
         System.out.println("DISTAPP : Event received : " + e);
 
+        if (isManager && e.getType() == Watcher.Event.EventType.NodeChildrenChanged && e.getPath().equals(workersPath)) {
+            getWorkers();
+        }
+        
         if(e.getType() == Watcher.Event.EventType.None) // This seems to be the event type associated with connections.
         {
             // Once we are connected, do our intialization stuff.
@@ -159,6 +165,15 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback
         //		The worker must invoke the "compute" function of the Task send by the client.
         //What to do if you do not have a free worker process?
         System.out.println("DISTAPP : processResult : " + rc + ":" + path + ":" + ctx);
+        if (isManager && path.equals(workersPath)) 
+            {
+                System.out.println("Manager updated worker list: " + children);
+                aliveWorkers.clear();
+                aliveWorkers.addAll(children);
+                return;
+            }
+
+        
         for(String c: children)
         {
             System.out.println(c);
@@ -166,6 +181,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback
             {
                 //TODO There is quite a bit of worker specific activities here,
                 // that should be moved done by a process function as the worker.
+                
 
                 //TODO!! This is not a good approach, you should get the data using an async version of the API.
                 byte[] taskSerial = zk.getData(tasksPath+"/"+c, false, null);
