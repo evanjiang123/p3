@@ -1,0 +1,13 @@
+# Ignore course PDFs and similar documents
+*.pdf
+
+# Ignore compressed archives
+*.gz
+
+# Ignore the bundled ZooKeeper binary distribution
+apache-zookeeper-*/
+apache-zookeeper-*.*/
+apache-zookeeper-3.8.5-bin/
+zk/servers/
+*.class
+*DS_Store
