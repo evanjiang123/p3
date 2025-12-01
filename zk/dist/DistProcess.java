@@ -6,7 +6,8 @@ All materials provided to the students as part of this course is the property of
 import java.io.*;
 
 import java.util.*;
-
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 // To get the name of the host.
 import java.net.*;
 
@@ -40,6 +41,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
     String workerPath;
     Set<String> aliveWorkers = new HashSet<>();
     Set<String> tasksWithResults = new HashSet<>();  // Track completed tasks
+    final long TIME_SLICE_MS = 500; //Timeout for tasks.
 
     DistProcess(String zkhost)
     {
@@ -137,6 +139,16 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
             getWorkers();
         }
 
+        // Manager: worker status changed (became idle or got assigned)
+        if (isManager && e.getType() == Watcher.Event.EventType.NodeDataChanged
+            && e.getPath() != null && e.getPath().startsWith(workersPath + "/")) {
+            System.out.println("DISTAPP : Manager detected worker status change: " + e.getPath());
+            // Re-install watch on this worker
+            zk.getData(e.getPath(), this, null, null);
+            // Try to assign pending tasks (in case worker just became idle)
+            tryAssignTasks();
+        }
+
         if(e.getType() == Watcher.Event.EventType.None) // This seems to be the event type associated with connections.
         {
             // Once we are connected, do our intialization stuff.
@@ -224,7 +236,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 
         String workerId = aliveWorkers.iterator().next();
         String workerNodePath = workersPath + "/" + workerId;
-        zk.getData(workerNodePath, false, this, taskId + ":" + workerId);
+        zk.getData(workerNodePath, this, this, taskId + ":" + workerId);
     }
 
     //after receiving the data callback, you assign by changing idle to the task number
@@ -292,37 +304,70 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
     void executeTask(String taskId) {
         System.out.println("DISTAPP : Worker executing task: " + taskId);
         try {
-            //process input
+            DistTask dt;
+
+            // Retrieve task (either from memory or ZK)
             byte[] taskSerial = zk.getData(tasksPath + "/" + taskId, false, null);
             ByteArrayInputStream bis = new ByteArrayInputStream(taskSerial);
             ObjectInput in = new ObjectInputStream(bis);
-            DistTask dt = (DistTask) in.readObject();
-            dt.compute();
+            dt = (DistTask) in.readObject();
 
-            // process ouput
+            // dt is now effectively final
+            final DistTask task = dt;
+            AtomicBoolean interruptedFlag = new AtomicBoolean(false);
+
+            Thread computeThread = new Thread(() -> {
+                try {
+                    task.compute();
+                } catch (InterruptedException e) {
+                    interruptedFlag.set(true);
+                    System.out.println("DISTAPP : Task interrupted, partial state saved in-memory");
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            });
+
+            computeThread.start();
+
+            // Time slicing logic
+            computeThread.join(TIME_SLICE_MS);
+
+            if (computeThread.isAlive()) {
+                System.out.println("DISTAPP : Interrupting task (time slice expired)");
+                interruptedFlag.set(true);
+                computeThread.interrupt();
+            }
+
+            computeThread.join(); // Wait for thread termination
+
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             ObjectOutputStream oos = new ObjectOutputStream(bos);
-            oos.writeObject(dt);
+            oos.writeObject(task);
             oos.flush();
-            taskSerial = bos.toByteArray();
-            zk.create(tasksPath + "/" + taskId + "/result", taskSerial, Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-            System.out.println("DISTAPP : Worker completed task: " + taskId);
+            byte[] outputBytes = bos.toByteArray();
+            // Decide full completion vs partial
+            if (!interruptedFlag.get()) {
 
-            // set the worker back to idle for futre tasks
+                zk.create(tasksPath + "/" + taskId + "/result",
+                        outputBytes, Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+
+                System.out.println("DISTAPP : Worker completed task: " + taskId);
+            } else {
+                
+                zk.setData(tasksPath + "/" + taskId, outputBytes, -1);
+                System.out.println("DISTAPP : Task partially executed, saved in worker memory");
+            }
+
+            // Mark worker idle
             zk.setData(workerPath, "idle".getBytes(), -1);
             System.out.println("DISTAPP : Worker back to idle");
 
         } catch (Exception e) {
-            System.out.println("DISTAPP : Worker error executing task: " + e);
             e.printStackTrace();
-            // on error, go back to idle
-            try {
-                zk.setData(workerPath, "idle".getBytes(), -1);
-            } catch (Exception ex) {
-                System.out.println("DISTAPP : Worker error setting idle: " + ex);
-            }
+            try { zk.setData(workerPath, "idle".getBytes(), -1); } catch (Exception ignore) {}
         }
     }
+
 
     public static void main(String args[]) throws Exception
     {
