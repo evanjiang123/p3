@@ -87,7 +87,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
     // manager fetching worker znodes
     void getWorkers() {zk.getChildren(workersPath, this, this, null);}
 
-    // Manager fetching task znodes...
+    // Manager fetching task znodes
     void getTasks() {zk.getChildren(tasksPath, this, this, null);}
 
     // tries to create workers path (if it exsits ignore), then creates the path to specific worker
@@ -127,7 +127,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 
         System.out.println("DISTAPP : Event received : " + e);
 
-        // not mannager and watcher activated from worker path (so an assignment)
+        // not mannager and watch activated from worker path (so an assignment)
         if (!isManager && workerPath != null && e.getPath() != null && e.getPath().equals(workerPath)
             && e.getType() == Watcher.Event.EventType.NodeDataChanged) {
             System.out.println("DISTAPP : Worker detected assignment change");
@@ -139,13 +139,11 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
             getWorkers();
         }
 
-        // Manager: worker status changed (became idle or got assigned)
+        // for manager worker status changed (became idle or got assigned)
         if (isManager && e.getType() == Watcher.Event.EventType.NodeDataChanged
             && e.getPath() != null && e.getPath().startsWith(workersPath + "/")) {
             System.out.println("DISTAPP : Manager detected worker status change: " + e.getPath());
-            // Re-install watch on this worker
             zk.getData(e.getPath(), this, null, null);
-            // Try to assign pending tasks (in case worker just became idle)
             tryAssignTasks();
         }
 
@@ -221,8 +219,15 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
     void assignOneTask(List<String> tasks) {
         for (String taskId : tasks) {
             if (!tasksWithResults.contains(taskId)) {
-                findIdleWorkerAndAssign(taskId);
-                break; 
+                try {
+                    org.apache.zookeeper.data.Stat stat = zk.exists(tasksPath + "/" + taskId + "/result", false);
+                    if (stat == null) { 
+                        findIdleWorkerAndAssign(taskId);
+                        break;
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
             }
         }
     }
@@ -250,7 +255,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
         }
     }
 
-    // callback for checking if result exsits (task completion) or assignment success based of ctx (callback from zk.setData)
+    // callback for checking if result exsits (task completion) for logging, things would still function if i remove this block
     public void processResult(int rc, String path, Object ctx, org.apache.zookeeper.data.Stat stat) {
         if (ctx == null) return;
 
@@ -288,7 +293,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
             return;
         }
 
-        // Manager: Handle checking worker status for assignment
+        // for manager, Handle checking worker status for assignment
         if (isManager && ctx != null) {
             String ctxStr = (String) ctx;
             if (ctxStr.contains(":")) {
